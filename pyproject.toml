@@ -1,0 +1,15 @@
+[project]
+name = "github_agent"
+version = "0.1.0"
+description = "ADK agent để làm việc với GitHub thông qua github-mcp-server"
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk>=1.0.0",
+]
+
+[tool.adk.agents]
+github_agent = "github_agent.agent:root_agent"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta" 
