@@ -7,6 +7,7 @@ from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioConnectionPar
 from google.adk.tools import FunctionTool
 from mcp.client.stdio import StdioServerParameters
 from . import prompt
+from pathlib import Path
 from .tools import (
     validate_github_url,
     validate_github_token,
@@ -30,7 +31,7 @@ initialize_mcp_tool = FunctionTool(initialize_github_mcp_connection)
 github_mcp_toolset = MCPToolset(
     connection_params=StdioConnectionParams(
         server_params=StdioServerParameters(
-            command="github-mcp-server",  # Main command
+            command=str((Path(__file__).parent.parent / "github-mcp-server" / "github-mcp-server").resolve()),
             args=["stdio"],  # Use stdio subcommand for MCP protocol
             env={
                 # Set dummy token ban đầu, sẽ được cập nhật bởi initialize_mcp_tool
