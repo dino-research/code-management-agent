@@ -17,6 +17,7 @@ from .tools import (
     get_file_content_session,
     list_pull_requests_session,
     get_pull_request_session,
+    get_pull_request_diff_session,
     search_code_session,
     list_sessions,
     cleanup_expired_sessions
@@ -47,6 +48,7 @@ github_agent = LlmAgent(
         FunctionTool(get_file_content_session),
         FunctionTool(list_pull_requests_session),
         FunctionTool(get_pull_request_session),
+        FunctionTool(get_pull_request_diff_session),
         FunctionTool(search_code_session),
         
         # Session management tools
