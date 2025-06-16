@@ -29,40 +29,44 @@ def main(host: str, port: int, debug: bool):
     Server này cho phép GitHub Agent giao tiếp với other agents thông qua A2A Protocol.
     
     Ví dụ:
-        python -m github_agent --host localhost --port 10003
-        python -m github_agent --host 0.0.0.0 --port 8080 --debug
+        python -m github_agent --host 0.0.0.0 --port 10003
     """
     try:
-        # Tạo A2A server
-        app = create_github_a2a_server(host, port)
+        if debug:
+            logging.getLogger().setLevel(logging.DEBUG)
+            logger.debug("Debug mode enabled")
         
-        # Cấu hình logging level
-        log_level = "debug" if debug else "info"
+        logger.info("🚀 Khởi động GitHub Agent A2A Server...")
+        logger.info(f"📍 Server sẽ chạy tại: http://{host}:{port}")
+        logger.info("🔗 A2A endpoint: http://{host}:{port}/a2a")
         
-        print(f"""
-╔══════════════════════════════════════════════════════════════╗
-║                    🤖 GitHub Agent A2A Server                ║
-║                                                              ║
-║  🌐 Host: {host:<20} 🔌 Port: {port:<10}           ║
-║  🔧 Debug: {'Enabled' if debug else 'Disabled':<18} 📊 A2A Protocol: Ready    ║
-║                                                              ║
-║  🚀 Server starting...                                       ║
-╚══════════════════════════════════════════════════════════════╝
-        """)
+        # Tạo A2A server instance
+        server = create_github_a2a_server(host=host, port=port)
+        app = server.build()
+        
+        logger.info("✅ GitHub Agent A2A Server đã sẵn sàng!")
+        logger.info("📋 Skills available:")
+        logger.info("  - GitHub Repository Management")
+        logger.info("  - Pull Request Management")
+        logger.info("  - Code Search and Analysis")
+        logger.info("  - Session Management")
         
         # Chạy server
         uvicorn.run(
-            app,
-            host=host,
-            port=port,
-            log_level=log_level,
-            access_log=debug
+            app, 
+            host=host, 
+            port=port, 
+            log_level='debug' if debug else 'info'
         )
         
+    except KeyboardInterrupt:
+        logger.info("👋 Dừng GitHub Agent A2A Server...")
     except Exception as e:
         logger.error(f"❌ Lỗi khi khởi động server: {e}")
-        raise click.ClickException(f"Không thể khởi động server: {e}")
+        if debug:
+            raise
+        exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main() 
