@@ -1,12 +1,13 @@
 """
-Custom tools để tương tác với GitHub repository
+New GitHub Tools sử dụng session-based GitHub API Client
+Thay thế cho github-mcp-server để hỗ trợ multi-user
 """
+import json
 import re
-import os
-import subprocess
-import tempfile
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse
+from .session_manager import session_manager
+from .github_api_client import create_github_client
 
 
 def validate_github_url(url: str) -> Dict[str, Any]:
@@ -115,151 +116,451 @@ def validate_github_token(token: str) -> Dict[str, Any]:
         }
 
 
-def setup_github_environment(github_url: str, token: str) -> Dict[str, Any]:
+def create_github_session(github_url: str, token: str) -> str:
     """
-    Setup environment cho github-mcp-server và ADK
+    Tạo session mới và lưu trữ PAT cho user
     
     Args:
         github_url: GitHub repository URL
         token: GitHub Personal Access Token
         
     Returns:
-        Dict chứa thông tin setup
+        JSON string chứa thông tin session
     """
     try:
         # Validate inputs
         url_validation = validate_github_url(github_url)
         if not url_validation["valid"]:
-            return {
+            return json.dumps({
                 "success": False,
                 "error": f"GitHub URL không hợp lệ: {url_validation['error']}"
-            }
+            }, ensure_ascii=False)
             
         token_validation = validate_github_token(token)
         if not token_validation["valid"]:
-            return {
+            return json.dumps({
                 "success": False,
                 "error": f"GitHub token không hợp lệ: {token_validation['error']}"
-            }
+            }, ensure_ascii=False)
+        
+        # Tạo session mới
+        session_id = session_manager.create_session(github_url, token)
+        
+        # Test connection để đảm bảo token hoạt động
+        try:
+            client = create_github_client(session_id)
+            repo_info = client.get_repository_info(url_validation["owner"], url_validation["repo"])
             
-        # Set environment variables for github-mcp-server
-        # Đây là cách github-mcp-server expect environment variable
-        os.environ['GITHUB_PERSONAL_ACCESS_TOKEN'] = token
-        
-        # Lưu thông tin cho session (để có thể reference sau này)
-        repository_info = {
-            "owner": url_validation["owner"],
-            "repo": url_validation["repo"],
-            "clean_url": url_validation["clean_url"],
-            "token_type": token_validation["token_type"]
-        }
-        
-        return {
-            "success": True,
-            "message": "Environment đã được setup thành công cho github-mcp-server",
-            "repository": repository_info,
-            "note": "Bây giờ bạn có thể sử dụng các GitHub MCP tools để tương tác với repository"
-        }
-        
+            # Cập nhật thông tin session với repo info
+            session_manager.update_session(session_id, 
+                owner=url_validation["owner"],
+                repo=url_validation["repo"],
+                repo_full_name=repo_info.get("full_name"),
+                repo_description=repo_info.get("description")
+            )
+            
+            return json.dumps({
+                "success": True,
+                "session_id": session_id,
+                "message": "Session đã được tạo thành công",
+                "repository": {
+                    "owner": url_validation["owner"],
+                    "repo": url_validation["repo"],
+                    "full_name": repo_info.get("full_name"),
+                    "description": repo_info.get("description"),
+                    "stars": repo_info.get("stargazers_count"),
+                    "language": repo_info.get("language")
+                }
+            }, ensure_ascii=False)
+            
+        except Exception as api_error:
+            # Xóa session nếu không thể kết nối
+            session_manager.delete_session(session_id)
+            return json.dumps({
+                "success": False,
+                "error": f"Không thể kết nối tới GitHub với token này: {str(api_error)}"
+            }, ensure_ascii=False)
+            
     except Exception as e:
-        return {
+        return json.dumps({
             "success": False,
-            "error": f"Lỗi khi setup environment: {str(e)}"
-        }
+            "error": f"Lỗi khi tạo session: {str(e)}"
+        }, ensure_ascii=False)
 
 
-def clone_repository(github_url: str, destination_path: Optional[str] = None) -> Dict[str, Any]:
+def get_repository_info_session(session_id: str) -> str:
     """
-    Clone GitHub repository về local (alternative method)
+    Lấy thông tin repository sử dụng session
     
     Args:
-        github_url: GitHub repository URL
-        destination_path: Đường dẫn để clone (optional)
+        session_id: ID của session
         
     Returns:
-        Dict chứa thông tin về quá trình clone
+        JSON string chứa thông tin repository
     """
     try:
-        # Validate GitHub URL
-        url_validation = validate_github_url(github_url)
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info:
+            return json.dumps({
+                "success": False,
+                "error": "Session không tồn tại hoặc đã hết hạn"
+            }, ensure_ascii=False)
+        
+        client = create_github_client(session_id)
+        
+        # Parse owner/repo từ GitHub URL
+        url_validation = validate_github_url(session_info["github_url"])
         if not url_validation["valid"]:
-            return {
+            return json.dumps({
                 "success": False,
-                "error": f"GitHub URL không hợp lệ: {url_validation['error']}"
-            }
-            
-        # Prepare destination
-        if destination_path is None:
-            destination_path = tempfile.mkdtemp()
-            
-        repo_path = os.path.join(destination_path, url_validation["repo"])
+                "error": "GitHub URL trong session không hợp lệ"
+            }, ensure_ascii=False)
         
-        # Check if token is available
-        token = os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN')
-        if not token:
-            return {
-                "success": False,
-                "error": "GITHUB_PERSONAL_ACCESS_TOKEN chưa được set. Hãy chạy setup_github_environment trước."
-            }
-            
-        # Prepare clone URL with authentication
-        clone_url = f"https://{token}@github.com/{url_validation['owner']}/{url_validation['repo']}.git"
+        repo_info = client.get_repository_info(url_validation["owner"], url_validation["repo"])
         
-        # Execute git clone
-        result = subprocess.run(
-            ['git', 'clone', clone_url, repo_path],
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minutes timeout
-        )
+        return json.dumps({
+            "success": True,
+            "repository": repo_info
+        }, ensure_ascii=False)
         
-        if result.returncode == 0:
-            return {
-                "success": True,
-                "repo_path": repo_path,
-                "owner": url_validation["owner"],
-                "repo": url_validation["repo"],
-                "message": f"Repository đã được clone thành công vào {repo_path}"
-            }
-        else:
-            return {
-                "success": False,
-                "error": f"Lỗi khi clone repository: {result.stderr}",
-                "returncode": result.returncode
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "error": "Clone repository timeout (5 minutes)"
-        }
     except Exception as e:
-        return {
+        return json.dumps({
             "success": False,
-            "error": f"Lỗi không mong đợi: {str(e)}"
-        }
+            "error": f"Lỗi khi lấy thông tin repository: {str(e)}"
+        }, ensure_ascii=False)
 
 
-def get_repository_info(owner: str, repo: str) -> str:
+def clone_repository_session(session_id: str, destination_path: Optional[str] = None) -> str:
     """
-    Lấy thông tin cơ bản về repository
+    Clone repository sử dụng session
     
     Args:
-        owner: Repository owner
-        repo: Repository name
+        session_id: ID của session
+        destination_path: Đường dẫn đích (optional)
         
     Returns:
-        String chứa thông tin repository
+        JSON string chứa thông tin về quá trình clone
     """
-    return f"""
-Repository Information:
-- Owner: {owner}
-- Name: {repo}
-- URL: https://github.com/{owner}/{repo}
+    try:
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info:
+            return json.dumps({
+                "success": False,
+                "error": "Session không tồn tại hoặc đã hết hạn"
+            }, ensure_ascii=False)
+        
+        client = create_github_client(session_id)
+        
+        # Parse owner/repo từ GitHub URL
+        url_validation = validate_github_url(session_info["github_url"])
+        if not url_validation["valid"]:
+            return json.dumps({
+                "success": False,
+                "error": "GitHub URL trong session không hợp lệ"
+            }, ensure_ascii=False)
+        
+        result = client.clone_repository(
+            url_validation["owner"], 
+            url_validation["repo"], 
+            destination_path
+        )
+        
+        return json.dumps(result, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Lỗi khi clone repository: {str(e)}"
+        }, ensure_ascii=False)
 
-Để lấy thông tin chi tiết hơn, hãy sử dụng GitHub MCP tools sau khi setup environment.
-Ví dụ: get_repository, get_repository_content, search_repositories, etc.
-    """.strip()
+
+def get_repository_content_session(session_id: str, path: str = "", ref: str = "main") -> str:
+    """
+    Lấy nội dung thư mục/file trong repository sử dụng session
+    
+    Args:
+        session_id: ID của session
+        path: Đường dẫn file/folder (mặc định là root)
+        ref: Branch/commit reference (mặc định là main)
+        
+    Returns:
+        JSON string chứa thông tin files/folders
+    """
+    try:
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info:
+            return json.dumps({
+                "success": False,
+                "error": "Session không tồn tại hoặc đã hết hạn"
+            }, ensure_ascii=False)
+        
+        client = create_github_client(session_id)
+        
+        # Parse owner/repo từ GitHub URL
+        url_validation = validate_github_url(session_info["github_url"])
+        if not url_validation["valid"]:
+            return json.dumps({
+                "success": False,
+                "error": "GitHub URL trong session không hợp lệ"
+            }, ensure_ascii=False)
+        
+        content = client.get_repository_content(
+            url_validation["owner"], 
+            url_validation["repo"], 
+            path, 
+            ref
+        )
+        
+        return json.dumps({
+            "success": True,
+            "content": content
+        }, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Lỗi khi lấy nội dung repository: {str(e)}"
+        }, ensure_ascii=False)
+
+
+def get_file_content_session(session_id: str, path: str, ref: str = "main") -> str:
+    """
+    Lấy nội dung file cụ thể trong repository sử dụng session
+    
+    Args:
+        session_id: ID của session
+        path: Đường dẫn tới file
+        ref: Branch/commit reference
+        
+    Returns:
+        JSON string chứa nội dung file
+    """
+    try:
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info:
+            return json.dumps({
+                "success": False,
+                "error": "Session không tồn tại hoặc đã hết hạn"
+            }, ensure_ascii=False)
+        
+        client = create_github_client(session_id)
+        
+        # Parse owner/repo từ GitHub URL
+        url_validation = validate_github_url(session_info["github_url"])
+        if not url_validation["valid"]:
+            return json.dumps({
+                "success": False,
+                "error": "GitHub URL trong session không hợp lệ"
+            }, ensure_ascii=False)
+        
+        file_info = client.get_file_content(
+            url_validation["owner"], 
+            url_validation["repo"], 
+            path, 
+            ref
+        )
+        
+        return json.dumps({
+            "success": True,
+            "file": file_info
+        }, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Lỗi khi lấy nội dung file: {str(e)}"
+        }, ensure_ascii=False)
+
+
+def list_pull_requests_session(session_id: str, state: str = "open", per_page: int = 10) -> str:
+    """
+    Liệt kê pull requests sử dụng session
+    
+    Args:
+        session_id: ID của session
+        state: Trạng thái PR (open, closed, all)
+        per_page: Số PR trên mỗi page
+        
+    Returns:
+        JSON string chứa danh sách pull requests
+    """
+    try:
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info:
+            return json.dumps({
+                "success": False,
+                "error": "Session không tồn tại hoặc đã hết hạn"
+            }, ensure_ascii=False)
+        
+        client = create_github_client(session_id)
+        
+        # Parse owner/repo từ GitHub URL
+        url_validation = validate_github_url(session_info["github_url"])
+        if not url_validation["valid"]:
+            return json.dumps({
+                "success": False,
+                "error": "GitHub URL trong session không hợp lệ"
+            }, ensure_ascii=False)
+        
+        pull_requests = client.list_pull_requests(
+            url_validation["owner"], 
+            url_validation["repo"], 
+            state, 
+            per_page
+        )
+        
+        return json.dumps({
+            "success": True,
+            "pull_requests": pull_requests,
+            "count": len(pull_requests)
+        }, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Lỗi khi lấy danh sách pull requests: {str(e)}"
+        }, ensure_ascii=False)
+
+
+def get_pull_request_session(session_id: str, number: int) -> str:
+    """
+    Lấy thông tin chi tiết pull request sử dụng session
+    
+    Args:
+        session_id: ID của session
+        number: Số của pull request
+        
+    Returns:
+        JSON string chứa thông tin chi tiết pull request
+    """
+    try:
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info:
+            return json.dumps({
+                "success": False,
+                "error": "Session không tồn tại hoặc đã hết hạn"
+            }, ensure_ascii=False)
+        
+        client = create_github_client(session_id)
+        
+        # Parse owner/repo từ GitHub URL
+        url_validation = validate_github_url(session_info["github_url"])
+        if not url_validation["valid"]:
+            return json.dumps({
+                "success": False,
+                "error": "GitHub URL trong session không hợp lệ"
+            }, ensure_ascii=False)
+        
+        pull_request = client.get_pull_request(
+            url_validation["owner"], 
+            url_validation["repo"], 
+            number
+        )
+        
+        return json.dumps({
+            "success": True,
+            "pull_request": pull_request
+        }, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Lỗi khi lấy thông tin pull request: {str(e)}"
+        }, ensure_ascii=False)
+
+
+def search_code_session(session_id: str, query: str) -> str:
+    """
+    Tìm kiếm code trong repository sử dụng session
+    
+    Args:
+        session_id: ID của session
+        query: Từ khóa tìm kiếm
+        
+    Returns:
+        JSON string chứa kết quả tìm kiếm
+    """
+    try:
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info:
+            return json.dumps({
+                "success": False,
+                "error": "Session không tồn tại hoặc đã hết hạn"
+            }, ensure_ascii=False)
+        
+        client = create_github_client(session_id)
+        
+        # Parse owner/repo từ GitHub URL
+        url_validation = validate_github_url(session_info["github_url"])
+        if not url_validation["valid"]:
+            return json.dumps({
+                "success": False,
+                "error": "GitHub URL trong session không hợp lệ"
+            }, ensure_ascii=False)
+        
+        search_results = client.search_code(
+            query, 
+            url_validation["owner"], 
+            url_validation["repo"]
+        )
+        
+        return json.dumps({
+            "success": True,
+            "search_results": search_results
+        }, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Lỗi khi tìm kiếm code: {str(e)}"
+        }, ensure_ascii=False)
+
+
+def list_sessions() -> str:
+    """
+    Liệt kê tất cả session hiện tại
+    
+    Returns:
+        JSON string chứa danh sách sessions
+    """
+    try:
+        sessions = session_manager.list_sessions()
+        return json.dumps({
+            "success": True,
+            "sessions": sessions,
+            "count": len(sessions)
+        }, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Lỗi khi liệt kê sessions: {str(e)}"
+        }, ensure_ascii=False)
+
+
+def cleanup_expired_sessions(max_age_hours: int = 24) -> str:
+    """
+    Xóa các session hết hạn
+    
+    Args:
+        max_age_hours: Thời gian tối đa session được giữ (giờ)
+        
+    Returns:
+        JSON string chứa thông tin cleanup
+    """
+    try:
+        cleaned_count = session_manager.cleanup_expired_sessions(max_age_hours)
+        return json.dumps({
+            "success": True,
+            "message": f"Đã xóa {cleaned_count} session hết hạn",
+            "cleaned_count": cleaned_count
+        }, ensure_ascii=False)
+        
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Lỗi khi cleanup sessions: {str(e)}"
+        }, ensure_ascii=False)
 
 
 def show_github_setup_guide() -> str:
@@ -304,7 +605,7 @@ def show_github_setup_guide() -> str:
 ## Bước 6: Sau khi có token
 1. Cung cấp GitHub repository URL (ví dụ: https://github.com/owner/repo)
 2. Cung cấp token khi được yêu cầu
-3. Agent sẽ setup environment và cho phép sử dụng GitHub MCP tools
+3. Agent sẽ tạo session và cho phép sử dụng GitHub tools
 
 ## 🔒 Lưu ý bảo mật:
 - Không commit token vào code
@@ -313,53 +614,14 @@ def show_github_setup_guide() -> str:
 - Sử dụng token với expiration date hợp lý
 - Monitor token usage qua GitHub Settings
 
-## 🚀 GitHub MCP Tools có sẵn:
-Sau khi setup, bạn có thể sử dụng các tools sau:
-- **get_repository**: Lấy thông tin repository
-- **get_repository_content**: Xem nội dung files/folders
-- **search_repositories**: Tìm kiếm repositories
-- **list_commits**: Xem lịch sử commits
-- **create_branch**: Tạo branch mới
-- **search_code**: Tìm kiếm code
-- **get_file_contents**: Đọc nội dung file cụ thể
-- **list_branches**: Liệt kê các branches
+## 🚀 GitHub Tools có sẵn:
+Sau khi tạo session, bạn có thể sử dụng các tools sau:
+- **get_repository_info_session**: Lấy thông tin repository
+- **get_repository_content_session**: Xem nội dung files/folders
+- **get_file_content_session**: Đọc nội dung file cụ thể
+- **list_pull_requests_session**: Liệt kê pull requests
+- **get_pull_request_session**: Chi tiết pull request
+- **search_code_session**: Tìm kiếm code
+- **clone_repository_session**: Clone repository
 - Và nhiều tools khác...
-    """.strip()
-
-
-def initialize_github_mcp_connection(github_token: str, github_url: str = "") -> str:
-    """
-    Khởi tạo kết nối MCP với github-mcp-server sau khi có GitHub token
-    
-    Args:
-        github_token: GitHub Personal Access Token
-        github_url: GitHub repository URL (optional)
-        
-    Returns:
-        str: Thông báo kết quả
-    """
-    try:
-        # Validate token first
-        token_validation = validate_github_token(github_token)
-        if not token_validation["valid"]:
-            return f"❌ Token không hợp lệ: {token_validation['error']}"
-        
-        # Set environment variable cho github-mcp-server
-        os.environ["GITHUB_PERSONAL_ACCESS_TOKEN"] = github_token
-        
-        # Nếu có GitHub URL, extract repo info để set thêm context
-        if github_url:
-            url_validation = validate_github_url(github_url)
-            if url_validation["valid"]:
-                owner = url_validation["owner"]
-                repo = url_validation["repo"]
-                os.environ["GITHUB_REPOSITORY"] = f"{owner}/{repo}"
-                os.environ["GITHUB_OWNER"] = owner
-                return f"✅ Đã thiết lập kết nối MCP với GitHub thành công!\n📁 Repository: {owner}/{repo}\n🔐 Token type: {token_validation['token_type']}"
-            else:
-                return f"✅ Đã thiết lập token MCP với GitHub thành công!\n⚠️ GitHub URL có lỗi: {url_validation['error']}\n🔐 Token type: {token_validation['token_type']}"
-        else:
-            return f"✅ Đã thiết lập token MCP với GitHub thành công!\n🔐 Token type: {token_validation['token_type']}\n💡 Bạn có thể cung cấp GitHub URL để có thêm context về repository."
-        
-    except Exception as e:
-        return f"❌ Lỗi khi thiết lập kết nối MCP: {str(e)}" 
+    """.strip() 

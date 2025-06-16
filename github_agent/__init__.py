@@ -1,4 +1,6 @@
-"""GitHub Agent Package - ADK agent để làm việc với GitHub thông qua github-mcp-server"""
+"""GitHub Agent Package - ADK agent để làm việc với GitHub sử dụng session-based approach"""
 
-__version__ = "0.1.0" 
-from . import agent
+from .agent import root_agent
+
+__version__ = "2.0.0"
+__all__ = ["root_agent"]

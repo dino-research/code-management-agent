@@ -1,21 +1,25 @@
 """
-GitHub Agent - ADK agent để làm việc với GitHub thông qua github-mcp-server và MCP tools
+GitHub Agent - ADK agent để làm việc với GitHub sử dụng session-based approach
+Thay thế github-mcp-server để hỗ trợ multi-user
 """
 import os
 from google.adk.agents import LlmAgent
-from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset, StdioConnectionParams
 from google.adk.tools import FunctionTool
-from mcp.client.stdio import StdioServerParameters
 from . import prompt
-from pathlib import Path
 from .tools import (
     validate_github_url,
     validate_github_token,
-    setup_github_environment,
-    clone_repository,
-    get_repository_info,
     show_github_setup_guide,
-    initialize_github_mcp_connection
+    create_github_session,
+    get_repository_info_session,
+    clone_repository_session,
+    get_repository_content_session,
+    get_file_content_session,
+    list_pull_requests_session,
+    get_pull_request_session,
+    search_code_session,
+    list_sessions,
+    cleanup_expired_sessions
 )
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,41 +27,31 @@ load_dotenv()
 # Sử dụng Gemini 2.0 Flash cho hiệu suất tốt nhất
 MODEL = "gemini-2.0-flash-exp"
 
-# Tạo tool để initialize MCP connection
-initialize_mcp_tool = FunctionTool(initialize_github_mcp_connection)
-
-# Tạo MCPToolset để kết nối với github-mcp-server
-# Sẽ được khởi tạo với dummy environment ban đầu
-github_mcp_toolset = MCPToolset(
-    connection_params=StdioConnectionParams(
-        server_params=StdioServerParameters(
-            command=str((Path(__file__).parent.parent / "github-mcp-server" / "github-mcp-server").resolve()),
-            args=["stdio"],  # Use stdio subcommand for MCP protocol
-            env={
-                # Set dummy token ban đầu, sẽ được cập nhật bởi initialize_mcp_tool
-                "GITHUB_PERSONAL_ACCESS_TOKEN": "dummy_token_will_be_replaced"
-            }
-        )
-    )
-)
-
-# Tạo GitHub Agent chính
+# Tạo GitHub Agent với session-based approach
 github_agent = LlmAgent(
     model=MODEL,
     name="github_agent",
-    description="AI agent chuyên biệt để làm việc với GitHub repositories thông qua github-mcp-server",
-    instruction=prompt.GITHUB_AGENT_PROMPT,
+    description="AI agent chuyên biệt để làm việc với GitHub repositories sử dụng session-based approach",
+    instruction=prompt.GITHUB_AGENT_PROMPT_NEW,
     tools=[
-        # Custom tools để validate và setup
+        # Validation tools
         FunctionTool(validate_github_url),
         FunctionTool(validate_github_token),
-        FunctionTool(setup_github_environment),
-        initialize_mcp_tool,  # Tool để setup MCP connection
-        FunctionTool(clone_repository),
-        FunctionTool(get_repository_info),
         FunctionTool(show_github_setup_guide),
-        # MCP toolset từ github-mcp-server
-        github_mcp_toolset,
+        
+        # Session-based tools
+        FunctionTool(create_github_session),
+        FunctionTool(get_repository_info_session),
+        FunctionTool(clone_repository_session),
+        FunctionTool(get_repository_content_session),
+        FunctionTool(get_file_content_session),
+        FunctionTool(list_pull_requests_session),
+        FunctionTool(get_pull_request_session),
+        FunctionTool(search_code_session),
+        
+        # Session management tools
+        FunctionTool(list_sessions),
+        FunctionTool(cleanup_expired_sessions),
     ],
     # Store output cho debugging
     output_key="github_agent_result"

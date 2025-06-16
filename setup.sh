@@ -35,19 +35,6 @@ else
     exit 1
 fi
 
-# Check if Go is installed (for github-mcp-server)
-print_status "Checking Go installation..."
-if command -v go &> /dev/null; then
-    go_version=$(go version | awk '{print $3}')
-    print_status "Go $go_version is installed ✓"
-else
-    print_warning "Go is not installed. Please install Go first:"
-    echo "  - macOS: brew install go"
-    echo "  - Ubuntu: sudo apt install golang-go"
-    echo "  - Windows: Download from https://golang.org/dl/"
-    exit 1
-fi
-
 # Check if Google Cloud CLI is installed
 print_status "Checking Google Cloud CLI..."
 if command -v gcloud &> /dev/null; then
@@ -78,29 +65,6 @@ pip install -e .
 
 print_status "Python dependencies installed ✓"
 
-# Install github-mcp-server
-print_status "Installing github-mcp-server..."
-if command -v github-mcp-server &> /dev/null; then
-    print_status "github-mcp-server is already installed ✓"
-else
-    go install github.com/github/github-mcp-server/cmd/github-mcp-server@latest
-    
-    # Add Go bin to PATH if not already there
-    if [[ ":$PATH:" != *":$HOME/go/bin:"* ]]; then
-        export PATH="$HOME/go/bin:$PATH"
-        echo 'export PATH="$HOME/go/bin:$PATH"' >> ~/.bashrc
-        print_status "Added Go bin to PATH"
-    fi
-    
-    if command -v github-mcp-server &> /dev/null; then
-        print_status "github-mcp-server installed successfully ✓"
-    else
-        print_error "Failed to install github-mcp-server"
-        print_error "Please ensure Go bin directory is in your PATH: $HOME/go/bin"
-        exit 1
-    fi
-fi
-
 # Check Google Cloud authentication
 print_status "Checking Google Cloud authentication..."
 if gcloud auth list --filter=status:ACTIVE --format="value(account)" | grep -q .; then
@@ -128,5 +92,11 @@ echo "   source venv/bin/activate"
 echo "   adk web"
 echo ""
 echo "4. Open browser at http://localhost:8000 and select 'github_agent'"
+echo ""
+echo "🔧 Session-based GitHub Agent features:"
+echo "   - Multi-user support with session isolation"
+echo "   - Direct GitHub API integration"
+echo "   - Dynamic Personal Access Token setup"
+echo "   - Automatic session cleanup"
 echo ""
 echo "📚 For more information, see README.md" 
