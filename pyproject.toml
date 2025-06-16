@@ -5,6 +5,9 @@ description = "ADK agent để làm việc với GitHub thông qua github-mcp-se
 requires-python = ">=3.11"
 dependencies = [
     "google-adk>=1.0.0",
+    "click>=8.2.0",
+    "a2a-sdk>=0.2.6",
+    "uvicorn>=0.34.0",
 ]
 
 [tool.adk.agents]

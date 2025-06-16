@@ -1,232 +1,222 @@
-"""
-Agent Executor để wrap GitHub Agent cho A2A Protocol
-Chuyển đổi GitHub Agent của ADK thành A2A-compatible executor
-"""
-import json
-import asyncio
-from typing import Dict, Any, Optional
+import logging
 
-from a2a.server.agent_execution import AgentExecutor, RequestContext
-from a2a.server.events import EventQueue
+from typing import TYPE_CHECKING
+
+from a2a.server.agent_execution import AgentExecutor
+from a2a.server.agent_execution.context import RequestContext
+from a2a.server.events.event_queue import EventQueue
 from a2a.server.tasks import TaskUpdater
 from a2a.types import (
-    DataPart,
+    AgentCard,
+    FilePart,
+    FileWithBytes,
+    FileWithUri,
     Part,
-    Task,
     TaskState,
     TextPart,
     UnsupportedOperationError,
 )
-from a2a.utils import (
-    new_agent_parts_message,
-    new_agent_text_message,
-    new_task,
-)
 from a2a.utils.errors import ServerError
-from .agent import github_agent
-from google.adk.sessions import InMemorySessionService
-from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
-from google.adk.artifacts import InMemoryArtifactService
-from google.adk.runners import Runner
+from google.adk import Runner
 from google.genai import types
 
 
+if TYPE_CHECKING:
+    from google.adk.sessions.session import Session
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Constants
+DEFAULT_USER_ID = 'self'
+
+
 class GitHubAgentExecutor(AgentExecutor):
-    """
-    Agent Executor để chuyển đổi GitHub Agent ADK thành A2A-compatible
-    """
-    
-    def __init__(self):
-        """
-        Khởi tạo GitHub Agent Executor
-        """
-        self.github_agent = github_agent
-        self._user_id = 'a2a_user'  # Default user ID cho A2A
-        
-        # Tạo runner cho ADK agent
-        self._runner = Runner(
-            app_name=self.github_agent.name,
-            agent=self.github_agent,
-            artifact_service=InMemoryArtifactService(),
-            session_service=InMemorySessionService(),
-            memory_service=InMemoryMemoryService(),
-        )
+    """An AgentExecutor that runs an ADK-based Agent for weather."""
+
+    def __init__(self, runner: Runner, card: AgentCard):
+        self.runner = runner
+        self._card = card
+        # Track active sessions for potential cancellation
+        self._active_sessions: set[str] = set()
+
+    async def _process_request(
+        self,
+        new_message: types.Content,
+        session_id: str,
+        task_updater: TaskUpdater,
+    ) -> None:
+        session_obj = await self._upsert_session(session_id)
+        # Update session_id with the ID from the resolved session object.
+        # (it may be the same as the one passed in if it already exists)
+        session_id = session_obj.id
+
+        # Track this session as active
+        self._active_sessions.add(session_id)
+
+        try:
+            async for event in self.runner.run_async(
+                session_id=session_id,
+                user_id=DEFAULT_USER_ID,
+                new_message=new_message,
+            ):
+                if event.is_final_response():
+                    parts = [
+                        convert_genai_part_to_a2a(part)
+                        for part in event.content.parts
+                        if (part.text or part.file_data or part.inline_data)
+                    ]
+                    logger.debug('Yielding final response: %s', parts)
+                    await task_updater.add_artifact(parts)
+                    await task_updater.update_status(
+                        TaskState.completed, final=True
+                    )
+                    break
+                if not event.get_function_calls():
+                    logger.debug('Yielding update response')
+                    await task_updater.update_status(
+                        TaskState.working,
+                        message=task_updater.new_agent_message(
+                            [
+                                convert_genai_part_to_a2a(part)
+                                for part in event.content.parts
+                                if (
+                                    part.text
+                                    or part.file_data
+                                    or part.inline_data
+                                )
+                            ],
+                        ),
+                    )
+                else:
+                    logger.debug('Skipping event')
+        finally:
+            # Remove from active sessions when done
+            self._active_sessions.discard(session_id)
 
     async def execute(
         self,
         context: RequestContext,
         event_queue: EventQueue,
-    ) -> None:
+    ):
+        # Run the agent until either complete or the task is suspended.
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        # Immediately notify that the task is submitted.
+        if not context.current_task:
+            await updater.update_status(TaskState.submitted)
+        await updater.update_status(TaskState.working)
+        await self._process_request(
+            types.UserContent(
+                parts=[
+                    convert_a2a_part_to_genai(part)
+                    for part in context.message.parts
+                ],
+            ),
+            context.context_id,
+            updater,
+        )
+        logger.debug('[weather] execute exiting')
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue):
+        """Cancel the execution for the given context.
+
+        Currently logs the cancellation attempt as the underlying ADK runner
+        doesn't support direct cancellation of ongoing tasks.
         """
-        Thực thi GitHub Agent cho A2A request
-        
-        Args:
-            context: Request context từ A2A
-            event_queue: Queue để gửi events
-        """
-        try:
-            # Lấy user input từ A2A request
-            user_input = context.get_user_input()
-            task = context.current_task
-            
-            # Tạo task mới nếu chưa có
-            if not task:
-                task = new_task(context.message)
-                await event_queue.enqueue_event(task)
-            
-            # Tạo task updater
-            updater = TaskUpdater(event_queue, task.id, task.contextId)
-            
-            # Thông báo đang xử lý
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(
-                    "🔄 Đang xử lý yêu cầu GitHub...",
-                    task.contextId,
-                    task.id
-                ),
+        session_id = context.context_id
+        if session_id in self._active_sessions:
+            logger.info(
+                f'Cancellation requested for active weather session: {session_id}'
             )
-            
-            # Tạo ADK session
-            session = await self._runner.session_service.get_session(
-                app_name=self.github_agent.name,
-                user_id=self._user_id,
-                session_id=task.contextId,
-            )
-            
-            if session is None:
-                session = await self._runner.session_service.create_session(
-                    app_name=self.github_agent.name,
-                    user_id=self._user_id,
-                    state={},
-                    session_id=task.contextId,
-                )
-            
-            # Tạo ADK Content
-            content = types.Content(
-                role='user', 
-                parts=[types.Part.from_text(text=user_input)]
-            )
-            
-            # Thực thi GitHub Agent
-            final_response = None
-            artifacts = []
-            
-            async for event in self._runner.run_async(
-                user_id=self._user_id, 
-                session_id=session.id, 
-                new_message=content
-            ):
-                if event.is_final_response():
-                    # Xử lý response cuối cùng
-                    if (event.content and 
-                        event.content.parts and 
-                        event.content.parts[0].text):
-                        
-                        response_text = '\n'.join(
-                            [p.text for p in event.content.parts if p.text]
-                        )
-                        final_response = response_text
-                        
-                        # Tạo artifact từ response
-                        artifacts.append(
-                            Part(root=TextPart(text=response_text))
-                        )
-                        
-                    elif (event.content and 
-                          event.content.parts and 
-                          any([p.function_response for p in event.content.parts])):
-                        
-                        # Xử lý function response
-                        func_response = next(
-                            p.function_response.model_dump()
-                            for p in event.content.parts
-                            if p.function_response
-                        )
-                        
-                        # Chuyển đổi function response thành text
-                        response_text = json.dumps(func_response, ensure_ascii=False, indent=2)
-                        final_response = response_text
-                        
-                        artifacts.append(
-                            Part(root=TextPart(text=response_text))
-                        )
-                        
-                else:
-                    # Cập nhật progress cho intermediate events
-                    await updater.update_status(
-                        TaskState.working,
-                        new_agent_text_message(
-                            "🔄 Đang xử lý yêu cầu GitHub...",
-                            task.contextId,
-                            task.id
-                        ),
-                    )
-            
-            # Hoàn thành task với artifacts
-            if artifacts:
-                await updater.add_artifact(artifacts, name='github_response')
-                await updater.complete()
-            else:
-                # Fallback nếu không có artifacts
-                await updater.update_status(
-                    TaskState.completed,
-                    new_agent_text_message(
-                        final_response or "✅ Hoàn thành xử lý GitHub",
-                        task.contextId,
-                        task.id
-                    ),
-                    final=True,
-                )
-                
-        except Exception as e:
-            # Xử lý lỗi
-            error_message = f"❌ Lỗi khi xử lý GitHub: {str(e)}"
-            print(f"GitHubAgentExecutor error: {e}")  # Debug log
-            
-            await updater.update_status(
-                TaskState.failed,
-                new_agent_text_message(
-                    error_message,
-                    task.contextId,
-                    task.id
-                ),
-                final=True,
+            # TODO: Implement proper cancellation when ADK supports it
+            self._active_sessions.discard(session_id)
+        else:
+            logger.debug(
+                f'Cancellation requested for inactive weather session: {session_id}'
             )
 
-    async def cancel(
-        self, 
-        request: RequestContext, 
-        event_queue: EventQueue
-    ) -> Task | None:
-        """
-        Hủy execution (không được support)
-        
-        Args:
-            request: Request context
-            event_queue: Event queue
-            
-        Returns:
-            None (raises UnsupportedOperationError)
-        """
         raise ServerError(error=UnsupportedOperationError())
 
-    def get_processing_message(self) -> str:
+    async def _upsert_session(self, session_id: str) -> 'Session':
+        """Retrieves a session if it exists, otherwise creates a new one.
+
+        Ensures that async session service methods are properly awaited.
         """
-        Message hiển thị khi đang process
-        
-        Returns:
-            Processing message string
-        """
-        return "🔄 Đang xử lý yêu cầu GitHub..."
+        session = await self.runner.session_service.get_session(
+            app_name=self.runner.app_name,
+            user_id=DEFAULT_USER_ID,
+            session_id=session_id,
+        )
+        if session is None:
+            session = await self.runner.session_service.create_session(
+                app_name=self.runner.app_name,
+                user_id=DEFAULT_USER_ID,
+                session_id=session_id,
+            )
+        return session
 
 
-# Factory function để tạo GitHubAgentExecutor
-def create_github_agent_executor() -> GitHubAgentExecutor:
-    """
-    Factory function để tạo GitHub Agent Executor
-    
+def convert_a2a_part_to_genai(part: Part) -> types.Part:
+    """Convert a single A2A Part type into a Google Gen AI Part type.
+
+    Args:
+        part: The A2A Part to convert
+
     Returns:
-        GitHubAgentExecutor instance
+        The equivalent Google Gen AI Part
+
+    Raises:
+        ValueError: If the part type is not supported
     """
-    return GitHubAgentExecutor() 
+    part = part.root
+    if isinstance(part, TextPart):
+        return types.Part(text=part.text)
+    if isinstance(part, FilePart):
+        if isinstance(part.file, FileWithUri):
+            return types.Part(
+                file_data=types.FileData(
+                    file_uri=part.file.uri, mime_type=part.file.mime_type
+                )
+            )
+        if isinstance(part.file, FileWithBytes):
+            return types.Part(
+                inline_data=types.Blob(
+                    data=part.file.bytes, mime_type=part.file.mime_type
+                )
+            )
+        raise ValueError(f'Unsupported file type: {type(part.file)}')
+    raise ValueError(f'Unsupported part type: {type(part)}')
+
+
+def convert_genai_part_to_a2a(part: types.Part) -> Part:
+    """Convert a single Google Gen AI Part type into an A2A Part type.
+
+    Args:
+        part: The Google Gen AI Part to convert
+
+    Returns:
+        The equivalent A2A Part
+
+    Raises:
+        ValueError: If the part type is not supported
+    """
+    if part.text:
+        return TextPart(text=part.text)
+    if part.file_data:
+        return FilePart(
+            file=FileWithUri(
+                uri=part.file_data.file_uri,
+                mime_type=part.file_data.mime_type,
+            )
+        )
+    if part.inline_data:
+        return Part(
+            root=FilePart(
+                file=FileWithBytes(
+                    bytes=part.inline_data.data,
+                    mime_type=part.inline_data.mime_type,
+                )
+            )
+        )
+    raise ValueError(f'Unsupported part type: {part}')
