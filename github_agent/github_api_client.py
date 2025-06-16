@@ -214,6 +214,33 @@ class GitHubAPIClient:
         """
         return self._make_request("GET", f"repos/{owner}/{repo}/pulls/{number}")
     
+    def get_pull_request_diff(self, owner: str, repo: str, number: int) -> str:
+        """
+        Lấy diff của pull request ở dạng text
+        
+        Args:
+            owner: Tên owner của repository
+            repo: Tên repository  
+            number: Số của pull request
+            
+        Returns:
+            String chứa diff content
+        """
+        headers = self._get_headers()
+        headers["Accept"] = "application/vnd.github.v3.diff"
+        url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{number}"
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 401:
+            raise ValueError("GitHub token không hợp lệ hoặc đã hết hạn")
+        elif response.status_code == 404:
+            raise ValueError("Pull request không tồn tại")
+        elif response.status_code >= 400:
+            raise ValueError(f"GitHub API error: {response.status_code} - {response.text}")
+        
+        return response.text
+    
     def clone_repository(self, owner: str, repo: str, destination_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Clone repository về local sử dụng git command với token
@@ -231,9 +258,12 @@ class GitHubAPIClient:
             if not token:
                 return {"success": False, "error": "Session không tồn tại"}
             
-            # Tạo destination path nếu không được cung cấp
+            # Tạo destination path theo session ID nếu không được cung cấp
             if destination_path is None:
-                destination_path = tempfile.mkdtemp()
+                temp_base = os.path.join(tempfile.gettempdir(), "github_agent_sessions")
+                os.makedirs(temp_base, exist_ok=True)
+                destination_path = os.path.join(temp_base, self.session_id)
+                os.makedirs(destination_path, exist_ok=True)
             
             repo_path = os.path.join(destination_path, repo)
             

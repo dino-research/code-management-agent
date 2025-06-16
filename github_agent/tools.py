@@ -469,6 +469,80 @@ def get_pull_request_session(session_id: str, number: int) -> str:
         }, ensure_ascii=False)
 
 
+def get_pull_request_diff_session(session_id: str, number: int) -> str:
+    """
+    Lấy diff của pull request sử dụng session, output dạng markdown
+    
+    Args:
+        session_id: ID của session
+        number: Số của pull request
+        
+    Returns:
+        String chứa diff formatted dạng markdown
+    """
+    try:
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info:
+            return json.dumps({
+                "success": False,
+                "error": "Session không tồn tại hoặc đã hết hạn"
+            }, ensure_ascii=False)
+        
+        client = create_github_client(session_id)
+        
+        # Parse owner/repo từ GitHub URL
+        url_validation = validate_github_url(session_info["github_url"])
+        if not url_validation["valid"]:
+            return json.dumps({
+                "success": False,
+                "error": "GitHub URL trong session không hợp lệ"
+            }, ensure_ascii=False)
+        
+        # Lấy thông tin PR trước
+        pr_info = client.get_pull_request(
+            url_validation["owner"], 
+            url_validation["repo"], 
+            number
+        )
+        
+        # Lấy diff của PR
+        diff_content = client.get_pull_request_diff(
+            url_validation["owner"], 
+            url_validation["repo"], 
+            number
+        )
+        
+        # Format thành markdown
+        markdown_output = f"""# Pull Request #{number}: {pr_info.get('title', 'N/A')}
+
+## Thông tin chi tiết
+- **Trạng thái**: {pr_info.get('state', 'N/A')}
+- **Người tạo**: {pr_info.get('user', {}).get('login', 'N/A')}
+- **Ngày tạo**: {pr_info.get('created_at', 'N/A')}
+- **Ngày cập nhật**: {pr_info.get('updated_at', 'N/A')}
+- **Commits**: {pr_info.get('commits', 'N/A')}
+- **Additions**: +{pr_info.get('additions', 'N/A')}
+- **Deletions**: -{pr_info.get('deletions', 'N/A')}
+- **Changed files**: {pr_info.get('changed_files', 'N/A')}
+
+## Mô tả
+{pr_info.get('body', 'Không có mô tả')}
+
+## Changes (Diff)
+
+```diff
+{diff_content}
+```
+
+[Xem trên GitHub]({pr_info.get('html_url', '#')})
+"""
+        
+        return markdown_output
+        
+    except Exception as e:
+        return f"❌ **Lỗi khi lấy diff pull request**: {str(e)}"
+
+
 def search_code_session(session_id: str, query: str) -> str:
     """
     Tìm kiếm code trong repository sử dụng session
